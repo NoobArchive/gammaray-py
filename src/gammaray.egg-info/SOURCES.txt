@@ -1,0 +1,12 @@
+README.md
+pyproject.toml
+src/gammaray/__init__.py
+src/gammaray/__main__.py
+src/gammaray/cli.py
+src/gammaray/legacy.py
+src/gammaray.egg-info/PKG-INFO
+src/gammaray.egg-info/SOURCES.txt
+src/gammaray.egg-info/dependency_links.txt
+src/gammaray.egg-info/entry_points.txt
+src/gammaray.egg-info/requires.txt
+src/gammaray.egg-info/top_level.txt

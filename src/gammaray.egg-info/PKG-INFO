@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: gammaray
+Version: 0.1.0
+Summary: Gamma resource workshop: unpack / convert / pack
+Requires-Python: >=3.10
+Provides-Extra: full
+Requires-Dist: pillow; extra == "full"
+Requires-Dist: numpy; extra == "full"
+Requires-Dist: texture2ddecoder; extra == "full"

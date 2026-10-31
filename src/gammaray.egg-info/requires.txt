@@ -1,0 +1,5 @@
+
+[full]
+pillow
+numpy
+texture2ddecoder
