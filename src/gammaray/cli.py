@@ -50,7 +50,8 @@ def _convert_tex(src, tex_out, counts):
             print(f"  [tex err] {rel}: {e}")
 
 
-def _convert_models(src, out, tex_root, counts, clips=False, fps=30.0):
+def _convert_models(src, out, tex_root, counts, clips=False, fps=30.0,
+                    orphan_clips=False):
     for group in ("role", "fx"):
         mod = src / group / "mod"
         ani = src / group / "ani"
@@ -75,9 +76,13 @@ def _convert_models(src, out, tex_root, counts, clips=False, fps=30.0):
                                     "doubleSided": mi["doubleSided"]}
                         if not mat_opts["doubleSided"] and not gm._winding_consistent(mesh):
                             mat_opts["doubleSided"] = True
-                gm.write_glb(str(dst), mesh, textures, anims=(
-                    gm.ans_clip_paths(mesh["ans_path"]) if clips and mesh.get("ans_path") else None
-                ), fps=fps, mat_opts=mat_opts)
+                anims = (gm.ans_clip_paths(mesh["ans_path"],
+                                           include_orphans=orphan_clips)
+                         if clips and mesh.get("ans_path") else None)
+                gm.write_glb(str(dst), mesh, textures, anims=anims, fps=fps,
+                             mat_opts=mat_opts)
+                if anims:
+                    gm._write_anim_manifest(mesh, str(dst), anims, fps)
                 counts["models"] = counts.get("models", 0) + 1
             except Exception as e:
                 counts["models_error"] = counts.get("models_error", 0) + 1
@@ -157,7 +162,8 @@ def cmd_convert(args):
         _convert_tex(src, tex_root, counts)
     if "models" in only:
         print("[2/4] models -> GLB")
-        _convert_models(src, out, tex_root, counts, args.clips, args.fps)
+        _convert_models(src, out, tex_root, counts, args.clips, args.fps,
+                        args.orphan_clips)
     if "ui" in only:
         print("[3/4] gui -> PNG")
         _convert_ui(src, out, tex_root, counts)
@@ -211,6 +217,8 @@ def build_parser():
                    help="逗号分隔: tex,models,ui,mat,fx")
     p.add_argument("--clips", action="store_true",
                    help="models 同时写入 .ans 的全部动画 clip")
+    p.add_argument("--orphan-clips", action="store_true",
+                   help="同时包含同模型未登记的 <model>_*.anf(如 attack_1)")
     p.add_argument("--fps", type=float, default=30.0,
                    help="动画时间轴帧率(默认 30)")
     p.set_defaults(func=cmd_convert)
