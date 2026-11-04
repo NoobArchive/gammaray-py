@@ -1138,7 +1138,9 @@ def parse_gui_tree(extra, version):
 
     def item(depth):
         it = {"class": r.s(), "name": r.s()}
-        it["f"] = [r.u32() for _ in range(5)]        # f[1..4] = x, y, w, h
+        # f[0] = style(u32);f[1..4] = x,y,w,h **有符号 int32**
+        # 旧版/运行时窗口常用负 x/y 表示左侧/屏幕外锚点,按 u32 会跑到左上角。
+        it["f"] = [r.u32()] + [r.i32() for _ in range(4)]
         # <=0x2711 没有 g[0..1];0x271B 仍会走第二个分支读取
         it["g"] = [r.u32() for _ in range(2)] if version > 0x2711 else [0, 0]
         it["h"] = r.u32()
