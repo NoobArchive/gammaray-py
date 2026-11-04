@@ -8,7 +8,8 @@ convert  out/original -> out/converted
 pack     files -> 单个 .r(记录级)
 ```
 
-内部暂时复用 `../gamma_formats.py` / `../gamma_models.py`;模块搬迁计划见
+后端在 `src/deltaxutils/`(原 `gamma_formats.py` / `gamma_models.py`),
+GammaRay 只负责前端工作流;模块继续拆分计划见
 [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)。
 
 ## 快速开始
@@ -24,7 +25,7 @@ python gammaray.py unpack <apk>/assets -o ..\out\original `
 uv run --with pillow --with texture2ddecoder --with numpy `
     python gammaray.py convert ..\out\original -o ..\out\converted `
     --only tex,models,ui,mat
-# 需要动画: 追加 --clips
+# 需要动画: 追加 --clips;未登记废案再加 --orphan-clips
 
 # 3) 打包一个文件
 python gammaray.py pack ..\out\packed\one.r <file>
