@@ -1351,7 +1351,7 @@ def _tile_source_piece(img, sx0, sy0, sx1, sy1, out_w, out_h):
 
 def render_gui(g, tex_root, out_png, bg=(24, 26, 32, 255), texts=None,
                font_path=None, draw_all_lists=False, flip_uv=True,
-               first_sibling_only=True, apply_rotation=True, hide_windows=None,
+               first_sibling_only=True, apply_rotation=False, hide_windows=None,
                tile_wrap=True):
     """把 `.gui` 合成为 PNG(需要 Pillow)。rect0=源 texel 矩形,rect1=目标矩形。"""
     from PIL import Image, ImageDraw, ImageFont
@@ -1739,7 +1739,7 @@ def cmd_gui_render(args):
         W, H, st = render_gui(g, args.tex_root, args.out, texts=texts,
                               flip_uv=not args.no_uv_flip,
                               first_sibling_only=not args.all_windows,
-                              apply_rotation=not args.no_rotation,
+                              apply_rotation=args.rotation,
                               hide_windows=set(args.hide_window),
                               tile_wrap=args.wrap_tile)
     except ImportError:
@@ -2897,8 +2897,10 @@ def main():
                    help="关闭 src 矩形负宽/负高触发的翻转(对照旧行为)")
     p.add_argument("--all-windows", action="store_true",
                    help="同矩形兄弟窗口全部绘制(默认只画内容最多的状态代表)")
+    p.add_argument("--rotation", action="store_true",
+                   help="实验性:按 state.f 旋转;多数 UI 的 f 并非屏幕角度")
     p.add_argument("--no-rotation", action="store_true",
-                   help="忽略 state.f 的旋转角")
+                   help="兼容旧参数;现在默认就不旋转")
     p.add_argument("--wrap-tile", dest="wrap_tile", action="store_true",
                    default=True, help="按 u[2]/u[3] 平铺(默认开启)")
     p.add_argument("--no-wrap-tile", dest="wrap_tile", action="store_false",
