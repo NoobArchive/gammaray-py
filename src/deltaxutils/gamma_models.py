@@ -806,7 +806,7 @@ def write_glb(path, mesh, textures=None, flip_v=False, anims=None, fps=30.0,
     while len(bin_) % 4:
         bin_.append(0)
     gltf = {
-        "asset": {"version": "2.0", "generator": "gamma_models.py"},
+        "asset": {"version": "2.0", "generator": "DeltaXUtils by zhuWin - mizukoud.icu"},
         "scene": 0,
         "scenes": [{"nodes": [0]}],
         "nodes": [{"mesh": 0, "name": mesh["name"]}],
