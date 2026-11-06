@@ -1,5 +1,8 @@
 import struct, os, sys, json, argparse, hashlib, glob
-from gammahash import hash_path
+try:
+    from .gammahash import hash_path
+except ImportError:
+    from gammahash import hash_path
 
 KEY = bytes([0xE7,0x9B,0x9B,0x9C,0x4E,0xD6,0x44,0x50,0xB3,0x53,0x8D,0xF1,0x38,0xCC,0xCE,0xA9])
 COMMON_EXT = {b'tex\0':'tex', b'ams\0':'ams', b'ans\0':'ans', b'anf\0':'anf',
