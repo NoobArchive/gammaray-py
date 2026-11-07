@@ -1222,13 +1222,19 @@ def cmd_fl_verify(args):
     fl_path = os.path.join(assets, args.filelist) if not os.path.isabs(args.filelist) \
         else args.filelist
     fl = parse_filelist(fl_path)
-    ok = bad = missing = 0
+    ok = bad = missing = size_bad = 0
     for p in fl["packages"]:
         data, err = load_package_bytes(assets, p)
         if err:
             missing += 1
             print(f"  [缺失] {err}")
             continue
+        for part in p["parts"]:
+            rp = r_path_from_z(part["name"], assets)
+            if os.path.exists(rp) and os.path.getsize(rp) != part["size"]:
+                size_bad += 1
+                print(f"  [SIZE] {part['name']} expected={part['size']} "
+                      f"actual={os.path.getsize(rp)}")
         entries, end, problems = parse_package(data)
         nrec, nmem = len(entries), len(p["members"])
         flag = "OK" if (nrec == nmem and not problems) else "MISMATCH"
@@ -1240,7 +1246,7 @@ def cmd_fl_verify(args):
             label = p["parts"][0]["name"].split("/")[-1]
             print(f"  [{flag}] {label} parts={len(p['parts'])} joined={len(data)} "
                   f"records={nrec} members={nmem} problems={problems}")
-    print(f"ok={ok} mismatch={bad} missing={missing}")
+    print(f"ok={ok} mismatch={bad} missing={missing} size_mismatch={size_bad}")
 
 
 def cmd_unpack(args):

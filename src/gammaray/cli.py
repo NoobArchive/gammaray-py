@@ -1,22 +1,32 @@
 """gammaray 统一 CLI。
 
-第一版只做三件事:
-  unpack  : assets -> out/original
-  convert : out/original -> out/converted (tex/models/ui/mat/fx)
-  pack    : files -> 单个 .r
+  unpack  : 目录 / .apk -> out/original(可 -c 顺带转换)
+  convert : out/original -> out/converted(tex/models/ui/mat/fx)
+  prepare : 把 PNG 预处理成 raw BGRA .tex,输出可再封包的目录
+  pack    : 目录 -> .r 包 + filelist_<version>.r(200KiB 分组/分片)
 
-内部复用 gamma_formats.py / gamma_models.py;后续按 ARCHITECTURE.md 搬模块。
+内部复用 DeltaXUtils 的 gamma_formats / gamma_models / rpack / texbuild。
 """
 
 import argparse
+import datetime
 import json
 import os
+import shutil
 import sys
+import tempfile
 import traceback
+import zipfile
 from pathlib import Path
 
 from . import __version__
 from .legacy import gf, gm, LEGACY_DIR
+
+DEFAULT_OUT = Path("out")
+
+
+def _ts():
+    return datetime.datetime.now().strftime("%Y%m%d%H%M%S")
 
 
 def _out_path(path):
@@ -25,19 +35,76 @@ def _out_path(path):
     return p
 
 
+# ---------------------------------------------------------------------------
+# unpack
+# ---------------------------------------------------------------------------
+def _pick_filelist(assets: Path, requested=None) -> Path:
+    if requested:
+        p = Path(requested)
+        if p.is_file():
+            return p.resolve()
+        q = assets / requested
+        if q.is_file():
+            return q.resolve()
+        raise SystemExit(f"找不到 filelist: {requested}")
+    cands = list(assets.glob("filelist_*.r"))
+    if not cands:
+        raise SystemExit(f"{assets} 下没有 filelist_*.r;请用 --filelist 指定")
+    if len(cands) > 1:
+        cands.sort(key=lambda p: p.stat().st_mtime)
+        print(f"找到多个 filelist,使用最新的: {cands[-1].name}")
+    return cands[-1].resolve()
+
+
+def _extract_apk_assets(apk: Path, tmp: Path) -> Path:
+    with zipfile.ZipFile(apk) as z:
+        names = [n for n in z.namelist()
+                 if n.startswith("assets/") and not n.endswith("/")]
+        if not names:
+            raise SystemExit(f"{apk} 里没有 assets/")
+        z.extractall(tmp, names)
+    return tmp / "assets"
+
+
 def cmd_unpack(args):
-    ns = argparse.Namespace(
-        assets=args.assets,
-        outdir=args.out,
-        filelist=args.filelist,
-        only=args.only,
-        include=args.include or [],
-        exclude=args.exclude or [],
-        keep_partial=args.keep_partial,
-    )
-    gf.cmd_unpack(ns)
+    src = Path(args.assets)
+    if not src.exists():
+        raise SystemExit(f"输入不存在: {src}")
+    out = Path(args.out) if args.out else DEFAULT_OUT / "original"
+    tmp = None
+    try:
+        if src.is_file() and src.suffix.lower() == ".apk":
+            tmp = Path(tempfile.mkdtemp(prefix="gammaray-apk-"))
+            assets = _extract_apk_assets(src, tmp)
+        else:
+            assets = src
+        fl = _pick_filelist(assets, args.filelist)
+        ns = argparse.Namespace(
+            assets=str(assets),
+            outdir=str(out),
+            filelist=str(fl),
+            only=args.only,
+            include=args.include or [],
+            exclude=args.exclude or [],
+            keep_partial=args.keep_partial,
+        )
+        gf.cmd_unpack(ns)
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    if args.convert is not None:
+        conv = Path(args.convert) if args.convert else DEFAULT_OUT / "converted"
+        cns = argparse.Namespace(
+            src=str(out), out=str(conv), only="tex,models,ui,mat",
+            tex_root=None, clips=False, orphan_clips=False, fps=30.0,
+        )
+        cmd_convert(cns)
 
 
+# ---------------------------------------------------------------------------
+# convert
+# ---------------------------------------------------------------------------
 def _convert_tex(src, tex_out, counts):
     for f in src.rglob("*.tex"):
         rel = f.relative_to(src)
@@ -155,7 +222,7 @@ def cmd_convert(args):
     unknown = only - valid
     if unknown:
         raise SystemExit(f"未知的 --only: {', '.join(sorted(unknown))}; 可选: {', '.join(sorted(valid))}")
-    tex_root = out / "tex"
+    tex_root = Path(args.tex_root) if args.tex_root else out / "tex"
     counts = {}
     if "tex" in only:
         print("[1/4] tex -> PNG")
@@ -177,44 +244,88 @@ def cmd_convert(args):
     print(f"-> {out}")
 
 
+# ---------------------------------------------------------------------------
+# prepare / pack
+# ---------------------------------------------------------------------------
+def cmd_prepare(args):
+    from deltaxutils import texbuild
+    src = Path(args.src)
+    out = Path(args.out) if args.out else DEFAULT_OUT / f"datapre-{_ts()}"
+    if not src.exists():
+        raise SystemExit(f"源目录不存在: {src}")
+    stats = texbuild.prepare_tree(str(src), str(out),
+                                  tex_format=args.tex_format, verbose=True)
+    print(f"prepare done: tex={stats['tex']} copied={stats['copied']} "
+          f"skipped={stats['skipped']} -> {out}")
+
+
+def _infer_version(src: Path):
+    fl = sorted(src.glob("filelist_*.r"))
+    if fl:
+        return fl[-1].stem[len("filelist_"):]
+    return "0.0.0"
+
+
 def cmd_pack(args):
+    from deltaxutils import rpack
+    src = Path(args.src)
+    if not src.is_dir():
+        raise SystemExit(f"需要目录: {src}")
+    out = Path(args.out) if args.out else DEFAULT_OUT / f"datarel-{_ts()}"
+    version = args.version or _infer_version(src)
+    if args.limit < 16:
+        raise SystemExit("--limit 至少为 16 字节")
+    stats = rpack.pack_tree(str(src), str(out), version=version,
+                            limit=args.limit, verbose=not args.quiet)
+    print(rpack.pack_summary(stats))
+
+
+def cmd_pack_records(args):
     blobs = [Path(f).read_bytes() for f in args.files]
     data = gf.build_package(blobs)
     out = _out_path(args.out)
     out.write_bytes(data)
     print(f"packed {len(blobs)} record(s) -> {out} ({len(data)} bytes)")
-    print("注意: 这不更新 filelist、不做 200KiB 分片、不处理 APK 签名。")
+    print("提示: 目录封包请用 `gammaray pack <dir>`。")
 
 
 def cmd_info(args):
     print(f"gammaray {__version__}")
     print(f"legacy: {LEGACY_DIR}")
-    print("commands: unpack / convert / pack / info")
-    print("docs: docs/GETTING-STARTED.md, docs/ARCHITECTURE.md")
+    print("commands: unpack / convert / prepare / pack / pack-records / info")
+    print("docs: README.md, docs/howto.md, docs/ARCHITECTURE.md")
 
 
+# ---------------------------------------------------------------------------
 def build_parser():
     ap = argparse.ArgumentParser(prog="gammaray",
                                  description="Gamma 资源工具统一入口")
     ap.add_argument("--version", action="version", version=__version__)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("unpack", help="解包 assets -> out/original")
-    p.add_argument("assets")
-    p.add_argument("-o", "--out", required=True)
-    p.add_argument("--filelist", default="filelist_1.3.3.4.7.r")
+    p = sub.add_parser("unpack", help="解包目录或 .apk -> out/original")
+    p.add_argument("assets", help="含 filelist 的目录,或 .apk")
+    p.add_argument("-o", "--out", default=None,
+                   help="输出目录(默认 out/original)")
+    p.add_argument("--filelist", default=None,
+                   help="手动指定 filelist(默认自动找最新的 filelist_*.r)")
+    p.add_argument("-c", "--convert", nargs="?", const="", default=None,
+                   help="解包后顺带转换;可选转换输出目录(默认 out/converted)")
     p.add_argument("--only", default=None,
-                   choices=sorted(gf.CATEGORY_PREFIXES.keys()))
+                   choices=sorted(gf.CATEGORY_PREFIXES.keys()),
+                   help="解包时只取某一类资源")
     p.add_argument("--include", action="append", default=[])
     p.add_argument("--exclude", action="append", default=[])
     p.add_argument("--keep-partial", action="store_true")
     p.set_defaults(func=cmd_unpack)
 
     p = sub.add_parser("convert", help="out/original -> out/converted")
-    p.add_argument("src")
-    p.add_argument("-o", "--out", required=True)
+    p.add_argument("src", nargs="?", default=str(DEFAULT_OUT / "original"))
+    p.add_argument("-o", "--out", default=str(DEFAULT_OUT / "converted"))
     p.add_argument("--only", default="tex,models,ui,mat",
                    help="逗号分隔: tex,models,ui,mat,fx")
+    p.add_argument("--tex-root", default=None,
+                   help="贴图 PNG 根目录(默认 <out>/tex)")
     p.add_argument("--clips", action="store_true",
                    help="models 同时写入 .ans 的全部动画 clip")
     p.add_argument("--orphan-clips", action="store_true",
@@ -223,10 +334,29 @@ def build_parser():
                    help="动画时间轴帧率(默认 30)")
     p.set_defaults(func=cmd_convert)
 
-    p = sub.add_parser("pack", help="文件 -> 单个 .r(记录级)")
+    p = sub.add_parser("prepare", help="PNG -> raw BGRA .tex(可再封包)")
+    p.add_argument("src")
+    p.add_argument("-o", "--out", default=None,
+                   help="输出目录(默认 out/datapre-时间戳)")
+    p.add_argument("--tex-format", default="bgra",
+                   help="当前只支持 bgra/raw;ATF/ETC/DXT 尚未实现")
+    p.set_defaults(func=cmd_prepare)
+
+    p = sub.add_parser("pack", help="目录 -> .r + filelist_<version>.r")
+    p.add_argument("src")
+    p.add_argument("-o", "--out", default=None,
+                   help="输出目录(默认 out/datarel-时间戳)")
+    p.add_argument("--version", default=None,
+                   help="filelist 版本号(默认读源目录已有 filelist,否则 0.0.0)")
+    p.add_argument("--limit", type=int, default=204800,
+                   help="逻辑包/分片大小(默认 204800 = 200KiB)")
+    p.add_argument("-q", "--quiet", action="store_true")
+    p.set_defaults(func=cmd_pack)
+
+    p = sub.add_parser("pack-records", help="文件 -> 单个 .r(旧版记录级)")
     p.add_argument("out")
     p.add_argument("files", nargs="+")
-    p.set_defaults(func=cmd_pack)
+    p.set_defaults(func=cmd_pack_records)
 
     p = sub.add_parser("info", help="显示路径/版本")
     p.set_defaults(func=cmd_info)
@@ -241,6 +371,8 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
+    except SystemExit:
+        raise
     except Exception:
         traceback.print_exc()
         return 1

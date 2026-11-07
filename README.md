@@ -1,39 +1,43 @@
 # GammaRay Resource Workshop (Python)
 
-Gamma 游戏资源工具的统一入口。当前是**可运行的最小版本**:
+Gamma 游戏资源工具的统一入口。后端在 `src/deltaxutils/`
+(`gamma_formats` / `gamma_models` / `rpack` / `texbuild`),
+GammaRay 负责工作流。
 
+```text
+unpack   目录 / .apk            -> out/original(可 -c 顺带转换)
+convert  out/original           -> out/converted
+prepare  PNG                    -> raw BGRA .tex(可再封包)
+pack     目录                   -> .r + filelist_<version>.r
 ```
-unpack   assets -> out/original
-convert  out/original -> out/converted
-pack     files -> 单个 .r(记录级)
-```
-
-后端在 `src/deltaxutils/`(原 `gamma_formats.py` / `gamma_models.py`),
-GammaRay 只负责前端工作流;模块继续拆分计划见
-[`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)。
 
 ## 快速开始
 
 ```powershell
 cd gammaray-py
 
-# 1) 解包
-python gammaray.py unpack <apk>/assets -o ..\out\original `
-    --filelist filelist_1.3.3.4.7.r
+# 1) 解包目录或 APK(自动找 filelist_*.r;也可 --filelist 指定)
+python gammaray.py unpack ..\V3-1.3.3\assets -o ..\out\original
 
-# 2) 批量转换(先 tex,再 models/ui)
-uv run --with pillow --with texture2ddecoder --with numpy `
-    python gammaray.py convert ..\out\original -o ..\out\converted `
-    --only tex,models,ui,mat
-# 需要动画: 追加 --clips;未登记废案再加 --orphan-clips
+# 解包 APK 并顺带转换(默认到 out/converted)
+python gammaray.py unpack ..\粉刷匠大作战_1.3.3.apk -o ..\out\original -c
 
-# 3) 打包一个文件
-python gammaray.py pack ..\out\packed\one.r <file>
+# 2) 只转换(默认 src=out/original, out=out/converted)
+uv run --with pillow --with texture2ddecoder `
+    python gammaray.py convert --only tex,models,ui,mat
+
+# 3) 预处理:PNG -> raw BGRA .tex
+uv run --with pillow python gammaray.py prepare ..\out\original `
+    -o ..\out\datapre
+
+# 4) 目录封包 + filelist(200KiB 分组/分片)
+python gammaray.py pack ..\out\datapre -o ..\out\datarel `
+    --version 1.3.3.4.7
 ```
 
 `convert` 输出:
 
-```
+```text
 out/converted/
   tex/     保持原相对路径
   models/  role/mod/*.glb, fx/mod/*.glb
@@ -46,27 +50,27 @@ out/converted/
 
 | 命令 | 说明 |
 |---|---|
-| `unpack` | 按 filelist 分组/拼接 `.r` 分片并解包 |
+| `unpack` | 解包含 filelist 的目录或 `.apk`;`-c` 顺带转换 |
 | `convert` | 批量转换 `.tex` / `.ams` / `.gui` / `.mtr` / `.eft` |
-| `pack` | 记录级打包;不更新 filelist/不分片/不签名 |
+| `prepare` | PNG 转 raw BGRA `.tex`(目前仅此编码) |
+| `pack` | 目录 → `.r` + `filelist_<version>.r`,200 KiB 分组/分片 |
+| `pack-records` | 旧版记录级打包(单 `.r`,不写 filelist) |
 | `info` | 显示版本与 legacy 目录 |
 
-## 现阶段的边界
+## 默认路径
 
-- `pack` 不是完整 APK 回包器;见 `docs/formats/package.md`;
-- `convert` 目前串行,失败文件会打印并继续;
-- 3D/UI/特效依赖 Pillow;ETC 贴图依赖 `texture2ddecoder`;
-- 详细工作流见 [`../docs/GETTING-STARTED.md`](../docs/GETTING-STARTED.md)。
-
-## 目标布局
-
-```
-src/gammaray/
-  cli.py legacy.py
-  common.py package.py tex.py eqp.py ui.py fx.py
-  models/{ams,ans,anf,glb}.py
-  convert.py pack.py
+```text
+unpack  -> out/original
+convert -> out/converted
+prepare -> out/datapre-YYYYMMDDHHMMSS
+pack    -> out/datarel-YYYYMMDDHHMMSS
 ```
 
-迁移顺序:`common/package/tex` → `ams/ans/anf/glb` → `gui/eft/mtr`。
-旧 `gamma_formats.py` / `gamma_models.py` 保留同名命令作为兼容壳。
+## 边界
+
+- `pack` 不生成服务器用的 `.z` 压缩包,`csize` 只是 zlib 估算;
+- `prepare` 只实现 raw BGRA(`format=3`),ATF/ETC/DXT 未确定;
+- GLB → `.ams` 尚未实现(动画/蒙皮/材质字段仍有缺口);
+- APK 只解包、不重打包/签名;
+- 详见 [`../docs/formats/rpack.md`](../docs/formats/rpack.md)、
+  [`../docs/GETTING-STARTED.md`](../docs/GETTING-STARTED.md)。
