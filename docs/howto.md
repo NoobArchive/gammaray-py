@@ -129,3 +129,4 @@ python gamma_models.py ams2glb x.ams out.glb --tex-root <png根> --ani-root <ani
 | UI 没有文字 | `convert` 的 src 下要有 `config/dictionary` |
 | `pack` 后游戏报 size 警告 | 说明覆盖了旧 `.r` 但没同步 filelist;需要时用新生成的 filelist 替换 |
 | `pack` 的压缩尺寸和官方不同 | `csize` 是 zlib 估算,服务器 `.z` 压缩器尚未实现 |
+| 在线版本服日志出现 `.z` 404 | 先清客户端本地缓存;版本服可能只做版本检查/serverlist,不分发 filelist/资源 |
