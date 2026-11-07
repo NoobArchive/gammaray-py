@@ -867,6 +867,114 @@ def cmd_tex_batch(args):
         print(f"   {k:24} {v}")
 
 
+def parse_eqp(data):
+    """完整解析 `.eqp`(CEquipmentGroup::Parse, 爆彩童话 2015 版)。
+
+    结构:
+      CCommonFileHead deps[0]=ams(部件) [1]=ans(动画) [2]=eft(特效) [3]=tex
+      u32 skinTypeCount
+        per type: u32 textSetCount
+          per set: u32+UTF-16 setName
+                   u32 skinCount
+                   per skin: u32+UTF-16 className + u32 texIndex
+      u32 equipmentCount
+        per equipment:
+          u32+UTF-16 name, u32+UTF-16 group
+          u32 aniIndex, u16 figureID, f32 scale
+          u32 effectIndex, u32+UTF-16 effectName
+          skinTypeCount × (u32+UTF-16 decorateSetName)
+          u32 meshPartCount
+            per part: u32 pieceIndex, u8 materialIndex,
+                      u32+UTF-16 pieceClassName
+          u32 hideCount × (u32+UTF-16 hideType)
+          u8 transparency, u8 hideSkin, u32 renderFlag,
+          u32+UTF-16 stateEffectFileName
+    """
+    head, off = CommonFileHead.parse(data, 0)
+    deps = {t.rstrip(b"\x00").decode("latin1"): list(ns) for t, ns in head.deps}
+    ams, ans, eft, tex = (deps.get(k, []) for k in ("ams", "ans", "eft", "tex"))
+    p = off
+
+    def u8():
+        nonlocal p
+        v = data[p]; p += 1; return v
+
+    def u16():
+        nonlocal p
+        v = struct.unpack_from("<H", data, p)[0]; p += 2; return v
+
+    def u32():
+        nonlocal p
+        v = struct.unpack_from("<I", data, p)[0]; p += 4; return v
+
+    def f32():
+        nonlocal p
+        v = struct.unpack_from("<f", data, p)[0]; p += 4; return v
+
+    def s():
+        nonlocal p
+        cnt = u32()
+        v = data[p:p + 2 * cnt].decode("utf-16-le", "replace")
+        p += 2 * cnt
+        return v
+
+    ntype = u32()
+    skin_types = {}
+    for _ in range(ntype):
+        for _ in range(u32()):
+            set_name = s()
+            skin = {}
+            for _ in range(u32()):
+                cls = s()
+                ti = u32()
+                skin[cls] = tex[ti] if ti < len(tex) else ti
+            skin_types[set_name] = skin
+
+    equipments = []
+    for _ in range(u32()):
+        name, group = s(), s()
+        ani_i = u32()
+        fig = u16()
+        scale = f32()
+        eff_i = u32()
+        eff_name = s()
+        dec = [s() for _ in range(ntype)]
+        parts = []
+        for _ in range(u32()):
+            pi = u32()
+            mat = u8()
+            pcls = s()
+            parts.append({"piece_index": pi,
+                          "piece": ams[pi] if pi < len(ams) else pi,
+                          "material_index": mat,
+                          "piece_class": pcls})
+        hides = [s() for _ in range(u32())]
+        transparency = u8()
+        hide_skin = u8()
+        render_flag = u32()
+        state_fx = s()
+        equipments.append({
+            "name": name, "group": group,
+            "ani_index": ani_i,
+            "ani": ans[ani_i] if ani_i < len(ans) else ani_i,
+            "figure_id": fig, "scale": scale,
+            "effect_index": eff_i,
+            "effect": eft[eff_i] if eff_i < len(eft) else eff_i,
+            "effect_name": eff_name,
+            "decorate_sets": dec,
+            "mesh_parts": parts,
+            "hide": hides,
+            "transparency": transparency,
+            "hide_skin": bool(hide_skin),
+            "render_flag": render_flag,
+            "state_effect": state_fx,
+        })
+    return {"version": head.version, "deps": deps,
+            "skin_type_count": ntype,
+            "skin_types": skin_types, "equipments": equipments,
+            "exact": p == len(data), "used": p, "size": len(data)}
+
+
 def parse_eqp_skins(data):
     """解析 `.eqp` 后半段的**皮肤表**(名字 + 部件类名)。
 
@@ -1517,10 +1625,10 @@ def _tile_source_piece(img, sx0, sy0, sx1, sy1, out_w, out_h):
     return piece
 
 
-def render_gui(g, tex_root, out_png, bg=(24, 26, 32, 255), texts=None,
+def render_gui(g, tex_root, out_png, bg=(0, 0, 0, 0), texts=None,
                font_path=None, draw_all_lists=False, flip_uv=True,
                first_sibling_only=True, apply_rotation=False, hide_windows=None,
-               tile_wrap=True):
+               tile_wrap=True, widget_bg=True):
     """把 `.gui` 合成为 PNG(需要 Pillow)。rect0=源 texel 矩形,rect1=目标矩形。"""
     from PIL import Image, ImageDraw, ImageFont
     texs = g["deps"].get("tex", [])
@@ -1685,7 +1793,7 @@ def render_gui(g, tex_root, out_png, bg=(24, 26, 32, 255), texts=None,
         w, h = it["f"][3], it["f"][4]
         if not all(abs(v) < 8192 for v in (x, y, w, h)) or w <= 0 or h <= 0:
             x, y, w, h = ox, oy, 0, 0
-        if w and h:
+        if w and h and widget_bg:
             canvas.alpha_composite(
                 Image.new("RGBA", (int(w), int(h)), (60, 80, 110, 40)), (int(x), int(y)))
         text_lst = None
@@ -1900,16 +2008,30 @@ def render_gui(g, tex_root, out_png, bg=(24, 26, 32, 255), texts=None,
     return W, H, stats
 
 
+def _parse_bg_color(spec):
+    """`transparent` / `RRGGBB` / `RRGGBBAA` -> RGBA 元组。"""
+    if not spec or str(spec).lower() in ("transparent", "none", "clear"):
+        return (0, 0, 0, 0)
+    h = str(spec).strip().lstrip("#")
+    if len(h) == 6:
+        h += "FF"
+    if len(h) != 8:
+        raise ValueError(f"bad --bg color: {spec!r} (use transparent/RRGGBB/RRGGBBAA)")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4, 6))
+
+
 def cmd_gui_render(args):
     g = parse_gui(args.gui)
     texts = load_gui_dictionary(args.config) if args.config else {}
     try:
         W, H, st = render_gui(g, args.tex_root, args.out, texts=texts,
+                              bg=_parse_bg_color(getattr(args, "bg", "transparent")),
                               flip_uv=not args.no_uv_flip,
                               first_sibling_only=not args.all_windows,
                               apply_rotation=args.rotation,
                               hide_windows=set(args.hide_window),
-                              tile_wrap=args.wrap_tile)
+                              tile_wrap=args.wrap_tile,
+                              widget_bg=getattr(args, "widget_bg", True))
     except ImportError:
         print("需要 Pillow: uv run --with pillow python gamma_formats.py gui-render ...")
         return
@@ -1938,7 +2060,10 @@ def cmd_gui_batch(args):
             os.makedirs(os.path.dirname(out), exist_ok=True)
             try:
                 g = parse_gui(src)
-                W, H, st = render_gui(g, args.tex_root, out, texts=texts)
+                W, H, st = render_gui(
+                    g, args.tex_root, out, texts=texts,
+                    bg=_parse_bg_color(getattr(args, "bg", "transparent")),
+                    widget_bg=getattr(args, "widget_bg", True))
                 drawn += st["drawn"]
                 total += st["states"]
                 wrapped += st["wrapped"]
@@ -2988,40 +3113,75 @@ def cmd_skins(args):
 
 
 def cmd_eqp(args):
-    """导出 .eqp(皮肤/装备清单)里的 UTF-16 名字:部件模型 + 皮肤名。"""
+    """完整解析 `.eqp`(装备名 → 动画/部件/特效/皮肤套装)。"""
     import json
     data = open(args.eqp, "rb").read()
-    names = parse_eqp_names(data)
-    skins = parse_eqp_skins(data)
+    try:
+        info = parse_eqp(data)
+    except Exception:
+        info = None
+    if info is None:
+        raise SystemExit("not a complete .eqp (parse failed)")
+
+    ams = info["deps"].get("ams", [])
+    ans = info["deps"].get("ans", [])
+    eft = info["deps"].get("eft", [])
+    tex = info["deps"].get("tex", [])
+    print(f"{args.eqp}: v{info['version']:#x} "
+          f"deps ams={len(ams)} ans={len(ans)} eft={len(eft)} tex={len(tex)}  "
+          f"skinTypes={info['skin_type_count']} "
+          f"sets={len(info['skin_types'])} "
+          f"equipment={len(info['equipments'])} "
+          f"exact={info['exact']} ({info['used']}/{info['size']})")
+
     rows = []
-    for i, n in enumerate(names):
+    for i, n in enumerate(ams):
         exists = None
         if args.root:
-            p = os.path.join(args.root, n.replace("/", os.sep))
-            exists = os.path.exists(p)
+            exists = os.path.exists(os.path.join(args.root, n.replace("/", os.sep)))
         rows.append({"index": i, "name": n, "exists": exists})
-    print(f"{args.eqp}: {len(names)} 个部件模型, {len(skins)} 个皮肤")
-    for r in rows:
-        mark = "" if r["exists"] is None else ("  [ok]" if r["exists"] else "  [missing]")
-        print(f"  {r['index']:2d}  {r['name']}{mark}")
-    if skins:
-        print("皮肤(名字 + 部件类名):")
-        for s in skins:
-            print(f"  {s['index']:2d}  {s['name']}  [{s['class']}]  @0x{s['offset']:04x}")
+
+    groups = {}
+    for e in info["equipments"]:
+        groups[e["group"]] = groups.get(e["group"], 0) + 1
+    print("groups: " + ", ".join(f"{k}={v}" for k, v in sorted(groups.items())))
+
+    for e in info["equipments"][:args.limit]:
+        parts = [f"{os.path.basename(p['piece'])}:{p['piece_class']}"
+                 f"#{p['material_index']}" for p in e["mesh_parts"]]
+        extra = []
+        if e["hide"]:
+            extra.append("hide=" + ",".join(e["hide"]))
+        if e["transparency"]:
+            extra.append(f"trans={e['transparency']}")
+        if e["hide_skin"]:
+            extra.append("hideSkin")
+        print(f"  [{e['group']}] {e['name']}  ani={os.path.basename(str(e['ani']))} "
+              f"scale={e['scale']:.3f} parts={parts}"
+              + ("  " + " ".join(extra) if extra else ""))
+
     if args.json:
+        out = {
+            "file": args.eqp,
+            "version": info["version"],
+            "exact": info["exact"],
+            "deps": info["deps"],
+            "parts": [r["name"] for r in rows],
+            "skin_type_count": info["skin_type_count"],
+            "skin_types": info["skin_types"],
+            "equipments": info["equipments"],
+        }
         with open(args.json, "w", encoding="utf-8") as f:
-            json.dump({"file": args.eqp,
-                       "parts": [r["name"] for r in rows],
-                       "skins": [{"index": s["index"], "name": s["name"],
-                                  "class": s["class"]} for s in skins]},
-                      f, ensure_ascii=False, indent=2)
+            json.dump(out, f, ensure_ascii=False, indent=2)
         print(f"-> {args.json}")
     if args.txt:
         with open(args.txt, "w", encoding="utf-8") as f:
             f.write("\n".join(r["name"] for r in rows) + "\n")
-            f.write("\n# skins\n")
-            f.write("\n".join(s["name"] for s in skins) + "\n")
+            f.write("\n# equipment\n")
+            for e in info["equipments"]:
+                f.write(f"{e['group']}\t{e['name']}\t{e['ani']}\n")
         print(f"-> {args.txt}")
+
 
 
 def main():
@@ -3058,6 +3218,7 @@ def main():
     p.add_argument("--json", default=None, help="同时写出 JSON")
     p.add_argument("--txt", default=None, help="同时写出纯文本名单")
     p.add_argument("--root", default=None, help="用该目录检查名字对应的文件是否存在")
+    p.add_argument("--limit", type=int, default=40, help="打印前 N 条装备(默认 40)")
     p.set_defaults(func=cmd_eqp)
 
     p = sub.add_parser("skins")
@@ -3117,6 +3278,11 @@ def main():
                    help="关闭 u[2]/u[3] 平铺,只缩放整块源矩形")
     p.add_argument("--hide-window", action="append", default=[],
                    help="按名字隐藏窗口(可多次,如 jishazhe)")
+    p.add_argument("--bg", default="transparent",
+                   help="画布底色:transparent / RRGGBB / RRGGBBAA(默认透明)")
+    p.add_argument("--no-widget-bg", dest="widget_bg", action="store_false",
+                   default=True,
+                   help="不画每个控件自己的占位底色(默认 60,80,110,40)")
     p.set_defaults(func=cmd_gui_render)
 
     p = sub.add_parser("gui-batch")
@@ -3125,6 +3291,11 @@ def main():
     p.add_argument("--tex-root", default=None)
     p.add_argument("--config", default=None)
     p.add_argument("-q", "--quiet", action="store_true")
+    p.add_argument("--bg", default="transparent",
+                   help="画布底色:transparent / RRGGBB / RRGGBBAA(默认透明)")
+    p.add_argument("--no-widget-bg", dest="widget_bg", action="store_false",
+                   default=True,
+                   help="不画每个控件自己的占位底色(默认 60,80,110,40)")
     p.set_defaults(func=cmd_gui_batch)
 
     p = sub.add_parser("fl-list"); p.add_argument("filelist")
