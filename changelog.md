@@ -11,7 +11,9 @@
 - `gammaray prepare`:PNG/JPEG/BMP → raw BGRA `.tex`(`format=3`,1 mip);
   `--tex-format` 目前只接受 `bgra`/`raw`。
 - `gammaray pack`:目录 → `.r` + `filelist_<version>.r`;
-  同目录 ≤200 KiB 合并,大文件 200 KiB 分片;排除根 `etc/`、`version.inf`。
+  同目录 ≤200 KiB 合并,大文件 200 KiB 分片;排除根 `etc/`、`version.inf`;
+  **版本号从根 `version.inf` 推断,并把 `etc/`、`version.inf` 复制到输出**;
+  输出目录里旧的 `filelist_*.r` 会被清理。
 - `gammaray pack-records`:保留旧版记录级 `.r` 打包。
 - 新增 `deltaxutils/rpack.py`、`deltaxutils/texbuild.py`。
 - `fl-verify` 增加 `size_mismatch`(filelist `size` 与实际 `.r` 长度)。

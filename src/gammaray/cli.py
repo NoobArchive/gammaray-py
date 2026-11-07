@@ -259,20 +259,22 @@ def cmd_prepare(args):
           f"skipped={stats['skipped']} -> {out}")
 
 
-def _infer_version(src: Path):
-    fl = sorted(src.glob("filelist_*.r"))
-    if fl:
-        return fl[-1].stem[len("filelist_"):]
-    return "0.0.0"
-
-
 def cmd_pack(args):
     from deltaxutils import rpack
     src = Path(args.src)
     if not src.is_dir():
         raise SystemExit(f"需要目录: {src}")
     out = Path(args.out) if args.out else DEFAULT_OUT / f"datarel-{_ts()}"
-    version = args.version or _infer_version(src)
+    version = args.version or rpack.detect_version(str(src))
+    if not version:
+        raise SystemExit(
+            "无法从源目录推断版本(根目录需要 version.inf 或 filelist_*.r);"
+            "请用 --version 指定,例如 --version 1.3.3.4.7")
+    vi_ver = rpack.read_version_inf(str(src))
+    if args.version and vi_ver and args.version != vi_ver:
+        raise SystemExit(
+            f"源 version.inf 是 {vi_ver},与 --version {args.version} 不一致;"
+            "游戏会按 version.inf 找 filelist_<version>.r")
     if args.limit < 16:
         raise SystemExit("--limit 至少为 16 字节")
     stats = rpack.pack_tree(str(src), str(out), version=version,

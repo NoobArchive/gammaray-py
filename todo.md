@@ -41,6 +41,8 @@ deltaxutils 准备不再弃用。
 - [ ] `convert --jobs N` 并行(先保证串行正确)
 - [ ] `convert` 输出 manifest.json(输入/输出/失败清单)
 - [x] 目录封包 + filelist(200 KiB 分组/分片) 261107
+- [x] `pack` 从根 `version.inf` 推断 filelist 版本,并复制 `etc/`、`version.inf` 到输出 261107
+- [x] 输出目录中清理旧的 `filelist_*.r`,避免游戏加载旧表 261107
 - [ ] `pack --replace`(只替换指定包、保持原成员顺序)
 - [x] `pack` 的成员顺序/大小校验(生成后 `size` 全量自检) 261107
 - [x] `unpack` 支持直接读取 APK(zip) 261107

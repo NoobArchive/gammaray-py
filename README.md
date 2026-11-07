@@ -30,9 +30,8 @@ uv run --with pillow --with texture2ddecoder `
 uv run --with pillow python gammaray.py prepare ..\out\original `
     -o ..\out\datapre
 
-# 4) 目录封包 + filelist(200KiB 分组/分片)
-python gammaray.py pack ..\out\datapre -o ..\out\datarel `
-    --version 1.3.3.4.7
+# 4) 目录封包 + filelist(200KiB 分组/分片;版本自动读 version.inf)
+python gammaray.py pack ..\out\datapre -o ..\out\datarel
 ```
 
 `convert` 输出:

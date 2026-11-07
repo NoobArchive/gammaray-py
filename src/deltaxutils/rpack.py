@@ -14,13 +14,46 @@ filelist 的 `csize` 是给服务器下载用的压缩尺寸;本地包不校验�
 这里用 zlib 估计,精确的服务器 `.z` 压缩器尚未实现。
 """
 
+import glob
 import hashlib
 import os
+import re
+import shutil
 import struct
 import zlib
 
 DEFAULT_LIMIT = 204800          # 200 KiB
 DEFAULT_VERSION = "0.0.0"
+
+
+def read_version_inf(src):
+    """读根目录 `version.inf` 的 `[Data] Version = ...`;没有则 None。"""
+    vi = os.path.join(os.path.abspath(src), "version.inf")
+    if not os.path.isfile(vi):
+        return None
+    try:
+        text = open(vi, "rb").read().decode("utf-8-sig", "replace")
+        m = re.search(r"^\s*Version\s*=\s*([0-9][0-9A-Za-z._-]*)",
+                      text, re.MULTILINE)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
+def detect_version(src):
+    """从源目录推断 filelist 版本号。
+
+    优先读根目录 `version.inf` 的 `[Data] Version = x.y.z`;
+    其次读已有的 `filelist_<ver>.r`。找不到返回 None。
+    """
+    v = read_version_inf(src)
+    if v:
+        return v
+    src = os.path.abspath(src)
+    cands = sorted(
+        os.path.basename(p)[len("filelist_"):-2]
+        for p in glob.glob(os.path.join(src, "filelist_*.r")))
+    return cands[-1] if cands else None
 
 
 def _norm_rel(path):
@@ -160,15 +193,47 @@ def pack_tree(src, outdir, version=DEFAULT_VERSION, limit=DEFAULT_LIMIT,
     text = "".join(rows).encode("utf-8")
     fl = struct.pack("<I", len(text)) + text
     fl_name = f"filelist_{version}.r"
+    # 同一个输出目录里如果还留着旧版本的 filelist,游戏会按 version.inf 找到旧表,
+    # 导致新 .r 全部对不上。打包时只保留本次生成的这一份。
+    for old in glob.glob(os.path.join(outdir, "filelist_*.r")):
+        if os.path.basename(old) != fl_name:
+            try:
+                os.remove(old)
+                if verbose:
+                    print(f"  removed stale {os.path.basename(old)}")
+            except OSError:
+                pass
     with open(os.path.join(outdir, fl_name), "wb") as f:
         f.write(fl)
     stats["filelist"] = fl_name
     stats["filelist_bytes"] = len(fl)
+    # etc/ 和 version.inf 不参与 .r,但必须原样留在输出目录里,
+    # 否则 datarel 不能直接作为 assets 使用。
+    copied = []
+    for name in ("etc", "version.inf"):
+        sp = os.path.join(src, name)
+        dp = os.path.join(outdir, name)
+        try:
+            if os.path.isdir(sp):
+                shutil.copytree(sp, dp, dirs_exist_ok=True)
+                copied.append(name + "/")
+            elif os.path.isfile(sp):
+                os.makedirs(os.path.dirname(dp), exist_ok=True)
+                shutil.copy2(sp, dp)
+                copied.append(name)
+        except OSError as e:
+            if verbose:
+                print(f"  [warn] copy {name}: {e}")
+    stats["sidecars"] = copied
     stats["outdir"] = outdir
     return stats
 
 
 def pack_summary(stats):
+    extra = ""
+    if stats.get("sidecars"):
+        extra = " sidecars=" + ",".join(stats["sidecars"])
     return (f"files={stats['files']} packages={stats['packages']} "
             f"parts={stats['parts']} data={stats['bytes']}B "
-            f"filelist={stats['filelist']} ({stats['filelist_bytes']}B)")
+            f"filelist={stats['filelist']} ({stats['filelist_bytes']}B)"
+            f"{extra}")

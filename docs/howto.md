@@ -58,15 +58,22 @@ uv run --with pillow python gammaray.py prepare <目录> -o out/datapre
 ## 目录封包 + 生成 filelist
 
 ```powershell
-python gammaray.py pack <目录> -o out/datarel --version 1.3.3.4.7
+python gammaray.py pack <目录> -o out/datarel [--version 1.3.3.4.7]
 ```
 
 规则:
 
+- **版本号默认从根目录 `version.inf` 的 `[Data] Version` 推断**,
+  其次读已有 `filelist_*.r`;都没有则必须 `--version`;
+- 若显式 `--version` 与 `version.inf` 不一致,工具直接报错,
+  因为游戏按 `version.inf` 去找 `filelist_<version>.r`;
 - 根目录 `etc/`、`version.inf`、`filelist_*.r` 不打包、不写 filelist;
+- 打包后会把源目录的 `etc/` 和 `version.inf` **原样复制**到输出目录,
+  所以 `out/datarel` 可以直接当 `assets/` 用;
 - 同一目录下按文件名排序,累计到 200 KiB 为一个逻辑包;
 - 单个文件超过 200 KiB 时独占一个包,整条 `.r` 流按 200 KiB 分片;
-- 输出 `<dir>/<md5>.r` 和 `filelist_<version>.r`。
+- 输出 `<dir>/<md5>.r` 和 `filelist_<version>.r`;
+- 输出目录里旧的 `filelist_*.r` 会被删除,避免游戏加载旧表。
 
 `--limit` 可改分组/分片阈值;`-q` 减少输出。
 
