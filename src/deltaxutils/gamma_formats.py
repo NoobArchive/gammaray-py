@@ -45,6 +45,12 @@ BPP = [4, 8, 24, 32, 16, 16, 4, 8, 24, 32, 16, 16, 16, 4, 8, 8,
 # IsCompressFormat() 返回 true 的枚举(块压缩格式)
 COMPRESSED = {0, 1, 6, 7, 13, 14}
 
+# 旧版 .tex(古域2 0x2711..0x2713/0x2715)的 D3D 格式映射,与上面的枚举无关
+LEGACY_FORMAT_GUESS = {
+    0: "DXT1", 1: "DXT5", 2: "RGB24", 3: "RGBA32",
+    4: "RGB565", 5: "A4R4G4B4",
+}
+
 # 依据位深 + 是否压缩 + GL 常见取值给出的“最可能”解释, 供参考
 FORMAT_GUESS = {
     0: "compressed 4bpp (DXT1/ETC1/PVRTC4)",
@@ -376,6 +382,7 @@ class TexFile:
     def __init__(self):
         self.head = CommonFileHead()
         self.index = [0] * 9
+        self.legacy_info = None      # 古域2 等旧版 0x2711..0x2713 的 6*u32 头
         self.extra = b""
         self.main = b""
 
@@ -387,29 +394,40 @@ class TexFile:
         self.extra = data[off:off + self.head.extra_size]
         off += self.head.extra_size
         self.main = data[off:]
-        if len(self.extra) >= 36:
+        if 0x2710 <= self.head.version <= 0x2713 and len(self.main) >= 24:
+            # 旧纹理头: format, width, height, mipCount, width2, height2
+            self.legacy_info = list(struct.unpack_from("<6I", self.main, 0))
+            self.main = self.main[24:]
+        elif self.head.version == 0x2715 and len(self.main) >= 40:
+            # 仅见的 0x2715 地图纹理: 8B 前缀 + [w,h,format,mip,usedW,usedH] + 8B 尾部
+            # (样本: map/_hash/00477af3.tex 1024x512 DXT1)
+            w, h, f, mip = struct.unpack_from("<4I", self.main, 8)
+            self.legacy_info = [f, w, h, mip, 0, 0]
+            self.legacy_tail = 8
+            self.main = self.main[40:]
+        elif len(self.extra) >= 36:
             self.index = list(struct.unpack_from("<9I", self.extra, 0))
         return self
 
     @property
     def format(self):
-        return self.index[0]
+        return self.legacy_info[0] if self.legacy_info else self.index[0]
 
     @property
     def storage(self):
-        return self.index[1]
+        return 0 if self.legacy_info else self.index[1]
 
     @property
     def mips(self):
-        return self.index[5]
+        return self.legacy_info[3] if self.legacy_info else self.index[5]
 
     @property
     def width(self):
-        return self.index[6]
+        return self.legacy_info[1] if self.legacy_info else self.index[6]
 
     @property
     def height(self):
-        return self.index[7]
+        return self.legacy_info[2] if self.legacy_info else self.index[7]
 
     def is_tex_magic(self):
         return self.head.type[:3] == b"tex" or self.head.type == MAGIC_TEX
@@ -496,6 +514,109 @@ class TexFile:
             x, y, z, w = src[i], src[i + 1], src[i + 2], src[i + 3]
             out[i:i + 4] = bytes((z, y, x, w)) if bgra else bytes((x, y, z, w))
         return bytes(out)
+
+    # ---- 旧版(0x2711..0x2713)纹理 ----
+    # 格式:0=DXT1 1=DXT5 2=RGB24 3=RGBA32 4=RGB565 5=A4R4G4B4
+    # mip: >=0x2712 每级前有 u32 压缩长度; 小于理论大小时是 16-bit 命令 RLE。
+    LEGACY_BPP = {0: 4, 1: 8, 2: 24, 3: 32, 4: 16, 5: 16}
+    LEGACY_BLOCK = {0: 8, 1: 16, 2: 3, 3: 4, 4: 2, 5: 2}
+
+    @staticmethod
+    def _rle_blocks(src, block, expect):
+        """CStaticTexture::ReadMipData 的块 RLE。
+
+        命令 u16:n = cmd & 0x7FFF;
+          bit15=0 -> 读一个 block, 重复 n 次;
+          bit15=1 -> 连续读 n 个 block。
+        """
+        out = bytearray()
+        p = 0
+        while p + 2 <= len(src) and len(out) < expect:
+            cmd = src[p] | (src[p + 1] << 8)
+            p += 2
+            n = cmd & 0x7FFF
+            if n == 0:
+                continue
+            if cmd & 0x8000:
+                need = n * block
+                out += src[p:p + need]
+                p += need
+            else:
+                blk = src[p:p + block]
+                p += block
+                out += blk * n
+        return bytes(out[:expect])
+
+    def legacy_levels(self):
+        """逐级返回 (w, h, data); 不完整时抛 ValueError。"""
+        w, h = self.width, self.height
+        bpp = self.LEGACY_BPP.get(self.format)
+        block = self.LEGACY_BLOCK.get(self.format)
+        if not bpp or w <= 0 or h <= 0:
+            raise ValueError(f"legacy unsupported format {self.format} {w}x{h}")
+        nlev = self.mips or 1
+        pos = 0
+        for _ in range(max(1, nlev)):
+            expect = max(block or 1, (w * h * bpp) // 8)
+            if self.head.version == 0x2715:
+                # 0x2715 样本没有逐级 u32 长度; 整块可能是 RLE
+                chunk = self._rle_blocks(self.main[pos:], block, expect)
+                pos = len(self.main)
+            elif self.head.version >= 0x2712:
+                if pos + 4 > len(self.main):
+                    raise ValueError("truncated mip size")
+                size = struct.unpack_from("<I", self.main, pos)[0]
+                pos += 4
+                if size >= expect:
+                    chunk = self.main[pos:pos + expect]
+                    pos += expect
+                else:
+                    chunk = self._rle_blocks(self.main[pos:pos + size], block, expect)
+                    pos += size
+            else:
+                chunk = self.main[pos:pos + expect]
+                pos += expect
+            if len(chunk) < expect:
+                raise ValueError(f"truncated mip {w}x{h}: {len(chunk)}/{expect}")
+            yield w, h, chunk
+            w = max(1, w // 2)
+            h = max(1, h // 2)
+
+    def legacy_first_level_rgba(self):
+        w, h, src = next(self.legacy_levels())
+        f = self.format
+        n = w * h
+        if f == 0:
+            return decode_dxt1(src, w, h)
+        if f == 1:
+            return decode_dxt5(src, w, h)
+        out = bytearray(n * 4)
+        if f == 2:                                   # D3DFMT_R8G8B8 -> BGR
+            for i in range(n):
+                b, g, r = src[i * 3], src[i * 3 + 1], src[i * 3 + 2]
+                out[i * 4:i * 4 + 4] = bytes((r, g, b, 255))
+            return bytes(out)
+        if f == 3:                                   # A8R8G8B8 -> BGRA
+            return self._swap32(src[:n * 4])
+        if f == 4:                                   # R5G6B5
+            for i in range(n):
+                v = src[i * 2] | (src[i * 2 + 1] << 8)
+                r = (v >> 11) & 0x1F
+                g = (v >> 5) & 0x3F
+                b = v & 0x1F
+                out[i * 4:i * 4 + 4] = bytes((r * 255 // 31, g * 255 // 63,
+                                              b * 255 // 31, 255))
+            return bytes(out)
+        if f == 5:                                   # A4R4G4B4
+            for i in range(n):
+                v = src[i * 2] | (src[i * 2 + 1] << 8)
+                a = (v >> 12) & 0xF
+                r = (v >> 8) & 0xF
+                g = (v >> 4) & 0xF
+                b = v & 0xF
+                out[i * 4:i * 4 + 4] = bytes((r * 17, g * 17, b * 17, a * 17))
+            return bytes(out)
+        return None
 
     # ---- 写回 ----
     def build(self) -> bytes:
@@ -664,6 +785,23 @@ def convert_tex(data, outdir, base):
             f.write(data)
         return "non-tex", [p]
     sniff = t.sniff(t.main)
+    if t.legacy_info:
+        try:
+            rgba = t.legacy_first_level_rgba()
+        except Exception as e:
+            p = os.path.join(outdir, base + ".bin")
+            with open(p, "wb") as f:
+                f.write(t.main)
+            return f"legacy-error-{e.__class__.__name__}", [p]
+        if rgba is None:
+            p = os.path.join(outdir, base + ".bin")
+            with open(p, "wb") as f:
+                f.write(t.main)
+            return f"legacy-format-{t.format}", [p]
+        p = os.path.join(outdir, base + ".png")
+        write_png(p, t.width, t.height, rgba)
+        return {0: "dxt1", 1: "dxt5", 2: "rgb24", 3: "rgba32",
+                4: "rgb565", 5: "a4r4g4b4"}.get(t.format, f"legacy-{t.format}"), [p]
     if t.storage == STORAGE_ATF or sniff == "atf":
         atf = parse_atf(t.main)
         if atf:
@@ -853,6 +991,9 @@ def cmd_tex_info(args):
             "extra_size": t.head.extra_size,
         },
         "index": t.index,
+        "legacy_info": t.legacy_info,
+        "legacy_format": (LEGACY_FORMAT_GUESS.get(t.format)
+                          if t.legacy_info else None),
         "format": t.format,
         "format_guess": FORMAT_GUESS.get(t.format),
         "bpp": BPP[t.format] if t.format < len(BPP) else None,
@@ -1125,7 +1266,15 @@ class _GuiReader:
 
     def s(self):
         n = self.u32()
-        if n > 4096 or self.p + n > len(self.b):
+        if n > 4096:
+            raise ValueError(f"bad string length {n} @{self.p - 4}")
+        if self.ver <= 0x2718:                       # 古域2 0x2714 等旧版: UTF-16LE
+            if self.p + 2 * n > len(self.b):
+                raise ValueError(f"bad string length {n} @{self.p - 4}")
+            v = self.b[self.p:self.p + 2 * n].decode("utf-16-le", "replace")
+            self.p += 2 * n
+            return v
+        if self.p + n > len(self.b):
             raise ValueError(f"bad string length {n} @{self.p - 4}")
         v = self.b[self.p:self.p + n].decode("utf-8", "replace")
         self.p += n
@@ -1170,17 +1319,27 @@ def parse_gui_tree(extra, version):
                     st = {"tex": r.u32(),
                           "uv": [r.f32() for _ in range(4)],     # 源矩形 (l,t,r,b) texel
                           "dst": [r.f32() for _ in range(4)],    # 目标矩形 (l,t,r,b)
-                          "k": r.u32(), "alpha": r.u8(),
-                          "f": struct.unpack("<b", bytes([r.u8()]))[0],
-                          "u": [r.u16() for _ in range(4)], "u5": r.u32()}
+                          "k": r.u32()}
+                    if version <= 0x2714:
+                        # 旧版(古域2 0x2714)状态只有 44B:
+                        # tex + uv + dst + k + u32(u[0])
+                        tail = r.u32()
+                        st.update({"alpha": 255, "f": 0,
+                                   "u": [tail & 0xFFFF, (tail >> 16) & 0xFFFF,
+                                         0xFFFF, 0xFFFF],
+                                   "u5": 0})
+                    else:
+                        st.update({"alpha": r.u8(),
+                                   "f": struct.unpack("<b", bytes([r.u8()]))[0],
+                                   "u": [r.u16() for _ in range(4)], "u5": r.u32()})
                     lst["states"].append(st)
                 ng = r.u32() if version > 0x2715 else 0
                 lst["groups"] = [r.b[r.p + 20 * j:r.p + 20 * (j + 1)] for j in range(ng)]
                 r.p += 20 * ng
                 ch["lists"].append(lst)
             it["children"].append(ch)
+        it["windows"] = []
         if depth == 0 or version > 0x271A:
-            it["windows"] = []
             for _ in range(r.u32()):
                 nm = r.s()
                 it["windows"].append([nm, item(depth + 1)])
@@ -1238,15 +1397,24 @@ def cmd_gui_info(args):
 
 def _find_tex(tex_root, name, cache):
     base = os.path.splitext(os.path.basename(name))[0]
-    if base in cache:
-        return cache[base]
+    key = name.replace("\\", "/").lower() or base
+    if key in cache:
+        return cache[key]
     hit = None
     if tex_root:
-        for r, _, fs in os.walk(tex_root):
-            if base + ".png" in fs:
-                hit = os.path.join(r, base + ".png")
-                break
-    cache[base] = hit
+        # 先按 .gui 依赖里的相对路径找:main01.tex 在 gui/tex/ 与 fx/tex/
+        # 可能同名,只按 basename 会拿错 atlas(U→V 越界、平铺判断失真)。
+        rel = os.path.splitext(name.replace("\\", "/"))[0] + ".png"
+        if rel and not rel.startswith("/") and ".." not in rel:
+            cand = os.path.join(tex_root, rel.replace("/", os.sep))
+            if os.path.isfile(cand):
+                hit = cand
+        if hit is None:
+            for r, _, fs in os.walk(tex_root):
+                if base + ".png" in fs:
+                    hit = os.path.join(r, base + ".png")
+                    break
+    cache[key] = hit
     return hit
 
 
@@ -2282,54 +2450,96 @@ def _mtr_blend_name(v):
 
 
 def parse_mtr_extra(extra, version):
-    """`CMaterialTemplate::_OnReadMainData` 的 extra(0x2716=24+slen, 0x2717=26+slen)。"""
+    """`CMaterialTemplate::_OnReadMainData` 的 extra。
+
+    0x2716 = 24+slen, 0x2717 = 26+slen;
+    0x2712 = 1 + 11 + 24/28, 0x2713 = len+slen + 11 + 28。
+    旧版把 ambient/diffuse/specular/emissive/power 直接存在模板里,
+    0x2716+ 只保留 diffuse + specularSharp + factor。
+    """
     r = _EftReader(extra, version)
     info = {"version": version}
-    info["shaderOverride"] = r.rawstr() if version > 0x2712 else ""
-    info["alphaBlendEnable"] = r.u8()
-    info["srcBlend"] = r.u8()
-    info["destBlend"] = r.u8()
-    info["f157"] = r.u8()
-    info["f158"] = r.u8()
-    info["alpharef"] = r.u8()
-    info["zTestEnable"] = r.u8()
-    info["zWrite"] = r.u8()
-    info["zTestFunc"] = r.u8()
-    info["cull"] = r.u8()
-    info["f160"] = r.u8()
-    # 这三个在 SMaterial(+76..+148) 之外,是 CMaterialTemplate 的旧版/编辑器字段:
-    # f157 在全部样本里与 zWrite 同值;f158/f160 为固定 5/3。
-    info["legacyZWrite"] = info["f157"]
-    info["legacy158"] = info["f158"]
-    info["legacy160"] = info["f160"]
     if version <= 0x2713:
-        r.skip(4)
-    diff = r.u32()
-    info["diffuse"] = diff
-    info["diffuse_rgba"] = [diff & 0xFF, (diff >> 8) & 0xFF,
-                            (diff >> 16) & 0xFF, (diff >> 24) & 0xFF]
-    if version > 0x2714:
-        info["specularSharp"] = r.u8()
-    else:
+        # 旧版: 0x2712 只有一个空的着色器占位字节;0x2713 是 std::string
+        if version <= 0x2712:
+            r.skip(1)
+            info["shaderOverride"] = ""
+        else:
+            info["shaderOverride"] = r.rawstr()
+        flags = [r.u8() for _ in range(11)]
+        (info["alphaBlendEnable"], info["srcBlend"], info["destBlend"],
+         info["f157"], info["f158"], info["alpharef"],
+         info["zTestEnable"], info["zWrite"], info["zTestFunc"],
+         info["cull"], info["f160"]) = flags
+        info["legacyZWrite"] = info["f157"]
+        info["legacy158"] = info["f158"]
+        info["legacy160"] = info["f160"]
+        vals = []
+        while r.p + 4 <= len(extra):
+            vals.append(r.u32())
+        info["legacy_vals"] = vals
+        info["legacy_color_flags"] = vals[0] if vals else 0
+        info["ambient"] = vals[1] if len(vals) > 1 else 0xFFFFFFFF
+        info["diffuse"] = vals[2] if len(vals) > 2 else 0xFFFFFFFF
+        info["specular"] = vals[3] if len(vals) > 3 else 0xFFFFFFFF
+        info["emissive"] = vals[4] if len(vals) > 4 else 0
+        info["specularPower"] = (struct.unpack("<f", struct.pack("<I", vals[5]))[0]
+                                 if len(vals) > 5 else 1.0)
+        info["factor_bytes"] = list(
+            vals[6].to_bytes(4, "little")) if len(vals) > 6 else [255] * 4
+        fb = info["factor_bytes"]
+        info["factor"] = [fb[2] / 255.0, fb[1] / 255.0, fb[0] / 255.0, fb[3] / 255.0]
         info["specularSharp"] = 0
-        r.skip(12)
-    if version > 0x2716:
-        info["f126"], info["f127"] = r.u8(), r.u8()
+        info["f126"] = 1 if info["specular"] not in (0xFF000000,) else 0
+        info["f127"] = 1 if info["emissive"] not in (0xFF000000, 0) else 0
     else:
-        info["f126"] = info["f127"] = 0
-    # 这两个字节位于 SMaterial(+76..+148) 内,即 SMaterial+50/+51。
-    # 12 个样本里只在 specular / emissive / octopus 上出现 255,按材质用途命名。
-    info["specularEnabled"] = info["f126"] != 0
-    info["emissiveEnabled"] = info["f127"] != 0
-    if version > 0x2715:
-        b0, b1, b2, b3 = r.u8(), r.u8(), r.u8(), r.u8()
-        # this+33..36 = (b2,b1,b0,b3)/255
-        info["factor_bytes"] = [b0, b1, b2, b3]
-        info["factor"] = [b2 / 255.0, b1 / 255.0, b0 / 255.0, b3 / 255.0]
-    else:
-        info["factor"] = [1.0, 1.0, 1.0, 1.0]
-    if version <= 0x2714 and r.p + 4 <= len(extra):
-        r.skip(4)
+        info["shaderOverride"] = r.rawstr() if version > 0x2712 else ""
+        info["alphaBlendEnable"] = r.u8()
+        info["srcBlend"] = r.u8()
+        info["destBlend"] = r.u8()
+        info["f157"] = r.u8()
+        info["f158"] = r.u8()
+        info["alpharef"] = r.u8()
+        info["zTestEnable"] = r.u8()
+        info["zWrite"] = r.u8()
+        info["zTestFunc"] = r.u8()
+        info["cull"] = r.u8()
+        info["f160"] = r.u8()
+        # 这三个在 SMaterial(+76..+148) 之外,是 CMaterialTemplate 的旧版/编辑器字段:
+        # f157 在全部样本里与 zWrite 同值;f158/f160 为固定 5/3。
+        info["legacyZWrite"] = info["f157"]
+        info["legacy158"] = info["f158"]
+        info["legacy160"] = info["f160"]
+        diff = r.u32()
+        info["diffuse"] = diff
+        info["diffuse_rgba"] = [diff & 0xFF, (diff >> 8) & 0xFF,
+                                (diff >> 16) & 0xFF, (diff >> 24) & 0xFF]
+        if version > 0x2714:
+            info["specularSharp"] = r.u8()
+        else:
+            info["specularSharp"] = 0
+            r.skip(12)
+        if version > 0x2716:
+            info["f126"], info["f127"] = r.u8(), r.u8()
+        else:
+            info["f126"] = info["f127"] = 0
+        # 这两个字节位于 SMaterial(+76..+148) 内,即 SMaterial+50/+51。
+        # 12 个样本里只在 specular / emissive / octopus 上出现 255,按材质用途命名。
+        info["specularEnabled"] = info["f126"] != 0
+        info["emissiveEnabled"] = info["f127"] != 0
+        if version > 0x2715:
+            b0, b1, b2, b3 = r.u8(), r.u8(), r.u8(), r.u8()
+            # this+33..36 = (b2,b1,b0,b3)/255
+            info["factor_bytes"] = [b0, b1, b2, b3]
+            info["factor"] = [b2 / 255.0, b1 / 255.0, b0 / 255.0, b3 / 255.0]
+        else:
+            info["factor"] = [1.0, 1.0, 1.0, 1.0]
+        if version <= 0x2714 and r.p + 4 <= len(extra):
+            r.skip(4)
+    info["diffuse_rgba"] = [info["diffuse"] & 0xFF, (info["diffuse"] >> 8) & 0xFF,
+                            (info["diffuse"] >> 16) & 0xFF, (info["diffuse"] >> 24) & 0xFF]
+    info["specularEnabled"] = info.get("specularEnabled", info["f126"] != 0)
+    info["emissiveEnabled"] = info.get("emissiveEnabled", info["f127"] != 0)
     info["extra_size"] = len(extra)
     info["exact"] = (r.p == len(extra))
     info["srcBlendName"] = _mtr_blend_name(info["srcBlend"])

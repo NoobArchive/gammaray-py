@@ -75,11 +75,11 @@ VARIANTS = {
 }
 
 
-def _decode_vertices(main, vcount, packed):
+def _decode_vertices(main, vcount, packed, start=4):
     st, bx, by, nbit, ub, unb, vb, vnb = VARIANTS[packed]
     pos, nor, uv = [], [], []
     for i in range(vcount):
-        b = main[4 + i * packed:4 + i * packed + packed]
+        b = main[start + i * packed:start + i * packed + packed]
         pos.append((_getbit(b, st, bx) * 0.25,
                     _getbit(b, st + bx, by) * 0.25,
                     _getbit(b, st + bx + by, bx) * 0.25))
@@ -565,6 +565,79 @@ def parse_ams_extra(extra, version):
     return out
 
 
+def _legacy_vertex_size(bits, scale):
+    """Gamma::GetVertexSize (GammaGraphic/VertexDecompress.h)。"""
+    if bits < 1024 and scale <= 1.02:
+        return 8
+    if bits < 4096 and scale <= 2.04:
+        return 9
+    if bits < 4096 and scale < 32.700001:
+        return 10
+    if bits < 0x4000 and scale < 32.700001:
+        return 11
+    return 12
+
+
+def _parse_legacy_pieces(main, version, metas):
+    """0x2712..0x2714 的 piece 主数据。
+
+    `CPiece::ReadMainData` (GammaGraphic):
+      u8   flags        (flags & 7) == 1 -> 后有 8B/顶点蒙皮
+      u32  ?            (实测 0)
+      f32  scale
+      [f32 ?]           version < 0x2712 才有
+      u16  ?            (通常 0)
+      u16  vertexCount
+      u8[vertexCount * stride]
+      [u8[vertexCount * 8]]   蒙皮
+      u32  indexCount
+      u8/u16 indices[]  (vertexCount > 255 -> u16)
+    顶点 stride 由包围盒 bits 与 scale 决定, 不再扫描猜测。
+    """
+    pos = 0
+    out = []
+    for mi in range(len(metas)):
+        if pos + 13 > len(main):
+            return None
+        flags = main[pos]
+        unk = struct.unpack_from("<I", main, pos + 1)[0]
+        scale = struct.unpack_from("<f", main, pos + 5)[0]
+        hdr = 13
+        if version < 0x2712:
+            hdr += 4
+        if pos + hdr > len(main):
+            return None
+        f21, vcount = struct.unpack_from("<HH", main, pos + hdr - 4)
+        if vcount == 0:
+            return None
+        size = metas[mi]["size"]
+        bits = int(max(abs(x) for x in size) * 4.0 + 0.5)
+        packed = _legacy_vertex_size(bits, scale)
+        # 0x2711 的样本(role/_hash/f8134a80.ams)flags bit0 并不是蒙皮位;
+        # 仅 0x2712+ 才按 (flags & 7) == 1 追加 8B 蒙皮。
+        skin = 8 if (version >= 0x2712 and (flags & 7) == 1) else 0
+        vstart = pos + hdr
+        ip = vstart + vcount * (packed + skin)
+        if ip + 4 > len(main):
+            return None
+        ic = struct.unpack_from("<I", main, ip)[0]
+        isz = 2 if vcount > 0xFF else 1
+        end = ip + 4 + ic * isz
+        if ic == 0 or end > len(main):
+            return None
+        fmt = "<H" if isz == 2 else "<B"
+        for k in range(0, ic, max(1, ic // 32)):
+            if struct.unpack_from(fmt, main, ip + 4 + k * isz)[0] >= vcount:
+                return None
+        try:
+            p, n, uv = _decode_vertices(main, vcount, packed, vstart)
+        except Exception:
+            return None
+        out.append((2.0, packed, skin, vcount, ic, ip + 4, end, p, n, uv))
+        pos = end
+    return out if pos == len(main) else None
+
+
 def parse_ams(path, ani_root=None, skin_variant=0):
     data = open(path, "rb").read()
     head, off = g.CommonFileHead.parse(data, 0)
@@ -596,10 +669,16 @@ def parse_ams(path, ani_root=None, skin_variant=0):
                 bestres = (total, (c,) + rest[1])
         return bestres
 
-    res = best(0)
-    if res is None or res[0] < 1.5:
-        return None
-    pieces = res[1]
+    if _metas and head.version < 0x2715:
+        legacy = _parse_legacy_pieces(main, head.version, _metas)
+        if not legacy:
+            return None
+        pieces = legacy
+    else:
+        res = best(0)
+        if res is None or res[0] < 1.5:
+            return None
+        pieces = res[1]
     name = os.path.splitext(os.path.basename(path))[0]
     skeleton = None
     ans_path = None
