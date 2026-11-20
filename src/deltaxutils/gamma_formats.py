@@ -34,6 +34,7 @@ import zlib
 try:
     import texture2ddecoder as _t2d
 except Exception:  # 纯标准库环境下仍可解码 raw/DXT
+    print("WARN: texture2ddecoder not available, will not convert ATF-based TEX textures")
     _t2d = None
 
 MAGIC_TEX = b"tex\x00"
