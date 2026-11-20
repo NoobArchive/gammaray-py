@@ -8,7 +8,8 @@
 
 ## 已完成(第一版)
 
-- [x] `gammaray unpack`(目录 / `.apk` / `-c` 顺带转换) 261107
+- [x] `gammaray unpack`(目录 / `.apk` / `-c` / **热更新 cache**) 261120
+- [x] 默认输出改为目标旁边的 `out/`(不依赖 pwd) 261120
 - [x] `gammaray convert`(tex / models / ui / mat / fx) 261107
 - [x] `gammaray prepare`(PNG → raw BGRA `.tex`) 261107
 - [x] `gammaray pack`(目录 → `.r` + `filelist_<ver>.r`,200 KiB 分组/分片) 261107

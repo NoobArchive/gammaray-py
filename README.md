@@ -58,11 +58,36 @@ out/converted/
 
 ## 默认路径
 
+默认输出都在**目标旁边的 `out/`**,不再取决于当前工作目录:
+
 ```text
-unpack  -> out/original
-convert -> out/converted
-prepare -> out/datapre-YYYYMMDDHHMMSS
-pack    -> out/datarel-YYYYMMDDHHMMSS
+unpack  <target>  -> <target 旁边>/out/original
+convert <src>     -> <src 旁边>/converted
+prepare <dir>     -> <dir 旁边>/out/datapre-YYYYMMDDHHMMSS
+pack    <dir>     -> <dir 旁边>/out/datarel-YYYYMMDDHHMMSS
+```
+
+例如:
+
+```powershell
+gammaray unpack D:\game\assets
+# -> D:\game\out\original
+
+gammaray convert D:\game\out\original
+# -> D:\game\out\converted
+
+gammaray pack D:\game\datapre
+# -> D:\game\out\datarel-...
+```
+
+## 热更新缓存
+
+Android 客户端的热更新缓存目录(文件名是 percent-encoded URL)可直接解包:
+
+```powershell
+gammaray unpack <...\files\cache> -o out/original
+# 自动识别 http%... / %F2 编码,按 /data/ 后的逻辑路径展开
+# 可选 --base <APK 的 assets 目录> 先铺基础资源再叠加缓存
 ```
 
 ## 边界

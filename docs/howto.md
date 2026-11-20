@@ -2,16 +2,33 @@
 
 > 所有命令默认在 `gammaray-py/` 下执行。`GammaRay` 是统一入口;
 > 需要单步排查时再直接调用 `deltaxutils/gamma_formats.py`。
+> **默认输出在目标旁边的 `out/`**,与当前工作目录无关。
 
 ## 解包目录
 
 ```powershell
-python gammaray.py unpack <含 filelist 的目录> -o out/original
+python gammaray.py unpack <含 filelist 的目录>
+# -> <目录旁边>/out/original
 ```
 
 - 自动选择最新的 `filelist_*.r`;需要时加 `--filelist filelist_1.3.3.4.7.r`;
 - 只解某一类:`--only config|tex|role|...`;
 - 路径过滤:`--include "role/mod/*"` / `--exclude "map/*"`。
+
+## 解包热更新缓存
+
+```powershell
+python gammaray.py unpack <...\files\cache>
+# 自动识别 percent-encoded 文件名(含 %F2),按 /data/ 后的路径展开
+```
+
+可选叠加基础资源:
+
+```powershell
+python gammaray.py unpack <cache> --base <APK 的 assets 目录>
+```
+
+缓存缺包会写进 `_unsupported.txt`;`fl-verify` 会显示 missing。
 
 ## 解包 APK
 
@@ -34,11 +51,11 @@ python gammaray.py unpack <assets 或 apk> -o out/original -c out/converted
 ## 只转换
 
 ```powershell
-# 默认 src=out/original, out=out/converted
+# 不给 src 时退回当前目录的 out/original;给了 src 就输出到 src 旁边的 converted
 uv run --with pillow --with texture2ddecoder python gammaray.py convert
 
 # 只转贴图/模型/UI/材质
-python gammaray.py convert out/original -o out/converted --only tex,ui
+python gammaray.py convert out/original --only tex,ui
 ```
 
 `models` / `ui` 依赖 `tex` 生成的 PNG:先转 `tex` 再转它们。
@@ -48,6 +65,7 @@ python gammaray.py convert out/original -o out/converted --only tex,ui
 
 ```powershell
 uv run --with pillow python gammaray.py prepare <目录> -o out/datapre
+# 不给 -o 时: <目录旁边>/out/datapre-时间戳
 ```
 
 - `.png/.jpg/.bmp` → 同名 `.tex`;其它文件原样复制;
@@ -59,6 +77,7 @@ uv run --with pillow python gammaray.py prepare <目录> -o out/datapre
 
 ```powershell
 python gammaray.py pack <目录> -o out/datarel [--version 1.3.3.4.7]
+# 不给 -o 时: <目录旁边>/out/datarel-时间戳
 ```
 
 规则:

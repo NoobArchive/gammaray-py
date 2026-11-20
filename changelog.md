@@ -5,7 +5,10 @@
 ## 2026-11-07
 
 - `gammaray unpack`:直接接受目录或 `.apk`;自动寻找 `filelist_*.r`;
-  `-c [目录]` 解包后顺带转换。
+  `-c [目录]` 解包后顺带转换;**热更新 cache 目录自动展开**
+  (percent-encoded `%F2` 文件名,按 `/data/` 后的路径)。
+- 默认输出改为**目标旁边的 `out/`**,不再依赖当前工作目录
+  (`unpack`、`convert`、`prepare`、`pack` 均如此)。
 - `gammaray convert`:默认 `out/original` → `out/converted`;
   `--only tex,models,ui,mat,fx`。
 - `gammaray prepare`:PNG/JPEG/BMP → raw BGRA `.tex`(`format=3`,1 mip);
