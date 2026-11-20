@@ -1,8 +1,16 @@
+<p align="center">
+  <a href="https://fsj.mqgamer.com">
+    <picture>
+      <img src="docs/imgs/seaborngamma-bg-261120.webp" alt="temp，实际图标和字体非图中所示">
+    </picture>
+  </a>
+</p>
+
 # GammaRay Resource Workshop (Python)
 
-Gamma 游戏资源工具的统一入口。后端在 `src/deltaxutils/`
-(`gamma_formats` / `gamma_models` / `rpack` / `texbuild`),
-GammaRay 负责工作流。
+**开发中版本，尚未清理并准备好公开，实在抱歉！！！！**
+
+**有急切的群友迫切需要，故转 public**
 
 ```text
 unpack   目录 / .apk            -> out/original(可 -c 顺带转换)
